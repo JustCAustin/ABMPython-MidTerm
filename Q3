@@ -1,0 +1,166 @@
+import json
+import os
+import threading
+import uuid
+from collections import deque
+from datetime import datetime
+
+
+DATA_FILE = "flight_bookings.json"
+
+
+class Seat:
+    def __init__(self, seat_number, seat_class="economy"):
+        self.seat_number = seat_number
+        self.seat_class = seat_class
+        self.is_booked = False
+        self.passenger = None
+
+
+class Flight:
+
+    def __init__(self, flight_no, origin, destination, total_seats=10, base_price=150.0):
+        self.flight_no = flight_no
+        self.origin = origin
+        self.destination = destination
+        self.base_price = base_price
+        self.seats = {f"{i:02d}": Seat(f"{i:02d}") for i in range(1, total_seats + 1)}
+        self.lock = threading.RLock()
+        self.waiting_list = deque()
+        self.bookings = {} 
+
+    def current_price(self):
+        total = len(self.seats)
+        booked = sum(1 for s in self.seats.values() if s.is_booked)
+        occupancy = booked / total
+        if occupancy < 0.5:
+            multiplier = 1.0
+        elif occupancy < 0.8:
+            multiplier = 1.25
+        elif occupancy < 1.0:
+            multiplier = 1.6
+        else:
+            multiplier = 2.0 
+        return round(self.base_price * multiplier, 2)
+
+    def book_seat(self, passenger_name):
+        with self.lock:
+            free_seat = next((s for s in self.seats.values() if not s.is_booked), None)
+            if free_seat is None:
+                self.waiting_list.append(passenger_name)
+                return {"status": "WAITLISTED", "position": len(self.waiting_list)}
+
+            price = self.current_price()
+            free_seat.is_booked = True
+            free_seat.passenger = passenger_name
+            booking_id = str(uuid.uuid4())[:8]
+            booking = {
+                "booking_id": booking_id,
+                "passenger": passenger_name,
+                "seat": free_seat.seat_number,
+                "price": price,
+                "flight_no": self.flight_no,
+                "status": "CONFIRMED",
+                "timestamp": datetime.now().isoformat(timespec="seconds"),
+            }
+            self.bookings[booking_id] = booking
+            return booking
+
+    def cancel_booking(self, booking_id):
+        with self.lock:
+            booking = self.bookings.get(booking_id)
+            if not booking or booking["status"] != "CONFIRMED":
+                return {"status": "ERROR", "message": "Booking not found or already cancelled."}
+            seat = self.seats[booking["seat"]]
+            seat.is_booked = False
+            seat.passenger = None
+            booking["status"] = "CANCELLED"
+
+            if self.waiting_list:
+                next_passenger = self.waiting_list.popleft()
+                new_booking = self.book_seat(next_passenger)
+                new_booking["promoted_from_waitlist"] = True
+                return {"status": "CANCELLED", "promoted": new_booking}
+            return {"status": "CANCELLED"}
+
+    def generate_boarding_pass(self, booking_id):
+        booking = self.bookings.get(booking_id)
+        if not booking or booking["status"] != "CONFIRMED":
+            return None
+        gate = f"G{(int(booking['seat']) % 12) + 1}"
+        return (
+            f"\n=========== BOARDING PASS ===========\n"
+            f" Flight:     {self.flight_no} ({self.origin} -> {self.destination})\n"
+            f" Passenger:  {booking['passenger']}\n"
+            f" Seat:       {booking['seat']}\n"
+            f" Gate:       {gate}\n"
+            f" Booking ID: {booking['booking_id']}\n"
+            f"=======================================\n"
+        )
+
+    def save_to_file(self, path=DATA_FILE):
+        with self.lock:
+            data = {
+                "flight_no": self.flight_no,
+                "bookings": self.bookings,
+                "waiting_list": list(self.waiting_list),
+            }
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2)
+
+    def occupancy_report(self):
+        booked = sum(1 for s in self.seats.values() if s.is_booked)
+        return f"{booked}/{len(self.seats)} seats booked, {len(self.waiting_list)} on waiting list"
+
+
+def demo():
+    flight = Flight("AA101", "JFK", "LAX", total_seats=5, base_price=200.0)
+    passengers = [f"Passenger-{i}" for i in range(1, 9)]  
+    results = {}
+    results_lock = threading.Lock()
+
+    def worker(name):
+        result = flight.book_seat(name)
+        with results_lock:
+            results[name] = result
+
+    threads = [threading.Thread(target=worker, args=(p,)) for p in passengers]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    print("=== Concurrent booking results (8 passengers, 5 seats) ===")
+    confirmed_seats = []
+    for name, res in results.items():
+        if res["status"] == "CONFIRMED":
+            confirmed_seats.append(res["seat"])
+            print(f"  {name}: CONFIRMED seat {res['seat']} at ${res['price']}")
+        else:
+            print(f"  {name}: WAITLISTED (position {res['position']})")
+
+    duplicates = len(confirmed_seats) != len(set(confirmed_seats))
+    print(f"\nDouble-booking check -> {'FAILED' if duplicates else 'PASSED'} "
+          f"(unique seats booked: {sorted(set(confirmed_seats))})")
+
+    print(f"\nOccupancy: {flight.occupancy_report()}")
+
+    some_booking_id = next(iter(flight.bookings))
+    cancelled_passenger = flight.bookings[some_booking_id]["passenger"]
+    print(f"\nCancelling booking for {cancelled_passenger}...")
+    cancel_result = flight.cancel_booking(some_booking_id)
+    print(f"Cancel result: {cancel_result}")
+
+    print(f"\nOccupancy after cancellation: {flight.occupancy_report()}")
+
+    still_confirmed = next(b for b in flight.bookings.values() if b["status"] == "CONFIRMED")
+    print(flight.generate_boarding_pass(still_confirmed["booking_id"]))
+
+    flight.save_to_file()
+    print(f"Booking data persisted to {DATA_FILE}")
+    if os.path.exists(DATA_FILE):
+        os.remove(DATA_FILE)  
+
+
+if __name__ == "__main__":
+    demo()

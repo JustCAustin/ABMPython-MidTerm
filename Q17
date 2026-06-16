@@ -1,0 +1,141 @@
+import os
+import statistics
+from functools import reduce
+
+
+GRADE_POINTS = {  # standard 4.0 scale buckets
+    "A": 4.0, "B": 3.0, "C": 2.0, "D": 1.0, "F": 0.0
+}
+
+
+def score_to_grade(score):
+    if score >= 90:
+        return "A"
+    if score >= 75:
+        return "B"
+    if score >= 60:
+        return "C"
+    if score >= 40:
+        return "D"
+    return "F"
+
+
+def generate_sample_data(filepath, num_students=200, subjects=("Math", "Science", "English", "History")):
+    """Writes a CSV-like text file: name,Math,Science,English,History"""
+    import random
+    with open(filepath, "w") as f:
+        f.write("name," + ",".join(subjects) + "\n")
+        for i in range(num_students):
+            scores = [str(random.randint(20, 100)) for _ in subjects]
+            f.write(f"Student{i+1}," + ",".join(scores) + "\n")
+
+
+def read_student_records(filepath):
+    with open(filepath, "r") as f:
+        header = f.readline().strip().split(",")
+        subjects = header[1:]
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split(",")
+            name = parts[0]
+            scores = {subj: int(val) for subj, val in zip(subjects, parts[1:])}
+            yield {"name": name, "scores": scores}
+
+
+def compute_gpa(scores: dict):
+    """GPA = average grade-point across subjects (lambda-driven mapping)."""
+    grade_points = list(map(lambda s: GRADE_POINTS[score_to_grade(s)], scores.values()))
+    return round(sum(grade_points) / len(grade_points), 2)
+
+
+def is_failing(scores: dict, passing_threshold=40):
+    return any(s < passing_threshold for s in scores.values())
+
+
+class StudentAnalytics:
+    def __init__(self, filepath):
+        self.filepath = filepath
+
+    def process(self):
+        students = []
+        subject_totals = {}
+        subject_counts = {}
+        subject_top = {}  
+
+        for record in read_student_records(self.filepath):
+            name, scores = record["name"], record["scores"]
+            gpa = compute_gpa(scores)
+            average = round(sum(scores.values()) / len(scores), 2)
+            failing = is_failing(scores)
+            students.append({"name": name, "scores": scores, "gpa": gpa,
+                              "average": average, "failing": failing})
+
+            for subject, score in scores.items():
+                subject_totals[subject] = subject_totals.get(subject, 0) + score
+                subject_counts[subject] = subject_counts.get(subject, 0) + 1
+                if subject not in subject_top or score > subject_top[subject][1]:
+                    subject_top[subject] = (name, score)
+
+        ranked = sorted(students, key=lambda s: s["gpa"], reverse=True)
+        for i, s in enumerate(ranked, start=1):
+            s["rank"] = i
+
+        fail_count = sum(1 for s in students if s["failing"])
+        fail_percentage = round(fail_count / len(students) * 100, 2) if students else 0.0
+
+        subject_averages = {
+            subj: round(subject_totals[subj] / subject_counts[subj], 2)
+            for subj in subject_totals
+        }
+
+        return {
+            "students": ranked,
+            "fail_count": fail_count,
+            "fail_percentage": fail_percentage,
+            "subject_averages": subject_averages,
+            "subject_toppers": subject_top,
+            "class_gpa_avg": round(statistics.mean(s["gpa"] for s in students), 2) if students else 0,
+        }
+
+    def report(self, top_n=5):
+        results = self.process()
+        lines = ["=== Student Analytics Report ==="]
+        lines.append(f"Total students processed: {len(results['students'])}")
+        lines.append(f"Class average GPA: {results['class_gpa_avg']}")
+        lines.append(f"Fail percentage (any subject < 40): {results['fail_percentage']}%")
+
+        lines.append("\nSubject averages:")
+        for subj, avg in results["subject_averages"].items():
+            lines.append(f"  {subj:10s}: {avg}")
+
+        lines.append("\nSubject toppers:")
+        for subj, (name, score) in results["subject_toppers"].items():
+            lines.append(f"  {subj:10s}: {name} ({score})")
+
+        lines.append(f"\nTop {top_n} students by GPA:")
+        for s in results["students"][:top_n]:
+            lines.append(f"  #{s['rank']} {s['name']:12s} GPA={s['gpa']} avg={s['average']}")
+
+        return "\n".join(lines)
+
+
+def demo():
+    data_path = "/tmp/student_scores.csv"
+    generate_sample_data(data_path, num_students=500)
+    print(f"Generated sample dataset with 500 students at {data_path}")
+
+    analytics = StudentAnalytics(data_path)
+    print(analytics.report(top_n=5))
+
+    print("\n=== Generator demo: first 3 records pulled lazily ===")
+    gen = read_student_records(data_path)
+    for _ in range(3):
+        print(f"  {next(gen)}")
+
+    os.remove(data_path)
+
+
+if __name__ == "__main__":
+    demo()

@@ -1,0 +1,136 @@
+import asyncio
+import random
+import uuid
+from dataclasses import dataclass, field
+
+
+@dataclass
+class PlayerStats:
+    wins: int = 0
+    losses: int = 0
+    matches_played: int = 0
+    total_score: int = 0
+
+    @property
+    def win_rate(self):
+        return round(self.wins / self.matches_played * 100, 1) if self.matches_played else 0.0
+
+
+@dataclass
+class Player:
+    name: str
+    skill_rating: int = 1000
+    stats: PlayerStats = field(default_factory=PlayerStats)
+    player_id: str = field(default_factory=lambda: str(uuid.uuid4())[:6])
+
+
+class GameRoom:
+
+    def __init__(self, player_a: Player, player_b: Player, room_id=None):
+        self.room_id = room_id or str(uuid.uuid4())[:6]
+        self.players = {player_a.name: player_a, player_b.name: player_b}
+        self.scores = {player_a.name: 0, player_b.name: 0}
+        self.finished = False
+        self.winner = None
+
+    async def update_score(self, player_name, points):
+        self.scores[player_name] += points
+        print(f"  [Room {self.room_id}] {player_name} scores {points} -> total {self.scores[player_name]}")
+
+    async def play(self, leaderboard):
+        """Simulates a real-time match: both players score points
+        concurrently over a few asynchronous 'ticks'."""
+        names = list(self.players.keys())
+        for _ in range(5):
+            await asyncio.gather(*[
+                self.update_score(name, random.randint(0, 15)) for name in names
+            ])
+            await asyncio.sleep(0.01)  
+
+        winner_name = max(self.scores, key=self.scores.get)
+        loser_name = next(n for n in names if n != winner_name)
+        self.winner = winner_name
+        self.finished = True
+
+        for name in names:
+            p = self.players[name]
+            p.stats.matches_played += 1
+            p.stats.total_score += self.scores[name]
+        self.players[winner_name].stats.wins += 1
+        self.players[loser_name].stats.losses += 1
+        leaderboard.record_match(self.players[winner_name], self.players[loser_name])
+
+        print(f"  [Room {self.room_id}] FINISHED -> winner: {winner_name} "
+              f"({self.scores[winner_name]} - {self.scores[loser_name]})")
+
+
+class Leaderboard:
+    def __init__(self):
+        self.players = {}  
+
+    def register(self, player: Player):
+        self.players[player.name] = player
+
+    def record_match(self, winner: Player, loser: Player):
+        k = 24
+        winner.skill_rating += k
+        loser.skill_rating = max(0, loser.skill_rating - k)
+
+    def top(self, n=10):
+        return sorted(self.players.values(), key=lambda p: p.skill_rating, reverse=True)[:n]
+
+    def display(self):
+        print("\n=== Leaderboard (by skill rating) ===")
+        for rank, p in enumerate(self.top(), start=1):
+            print(f"  #{rank} {p.name:10s} rating={p.skill_rating:4d} "
+                  f"W/L={p.stats.wins}/{p.stats.losses} win_rate={p.stats.win_rate}% "
+                  f"total_score={p.stats.total_score}")
+
+
+class Matchmaker:
+    """Pairs players with the closest skill rating for fair matches."""
+
+    def __init__(self, leaderboard: Leaderboard):
+        self.queue = []
+        self.leaderboard = leaderboard
+
+    def enqueue(self, player: Player):
+        self.queue.append(player)
+        self.leaderboard.register(player)
+
+    def make_matches(self):
+        self.queue.sort(key=lambda p: p.skill_rating)
+        matches = []
+        i = 0
+        while i + 1 < len(self.queue):
+            matches.append(GameRoom(self.queue[i], self.queue[i + 1]))
+            i += 2
+        leftover = self.queue[i:] if i < len(self.queue) else []
+        self.queue = leftover
+        return matches
+
+
+async def run_tournament():
+    leaderboard = Leaderboard()
+    matchmaker = Matchmaker(leaderboard)
+
+    names_ratings = [
+        ("Nova", 1200), ("Blaze", 950), ("Cipher", 1100), ("Echo", 1000),
+        ("Glitch", 880), ("Vortex", 1050), ("Specter", 1300), ("Raven", 970),
+    ]
+    for name, rating in names_ratings:
+        matchmaker.enqueue(Player(name, skill_rating=rating))
+
+    print("=== Matchmaking round 1 ===")
+    rooms = matchmaker.make_matches()
+    for r in rooms:
+        print(f"  Room {r.room_id}: {' vs '.join(r.players.keys())}")
+
+    print("\n=== Playing matches concurrently (async game rooms) ===")
+    await asyncio.gather(*[room.play(leaderboard) for room in rooms])
+
+    leaderboard.display()
+
+
+if __name__ == "__main__":
+    asyncio.run(run_tournament())

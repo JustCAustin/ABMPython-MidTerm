@@ -1,0 +1,147 @@
+import functools
+import time
+from collections import Counter, defaultdict
+
+
+def timed(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        start = time.perf_counter()
+        result = func(*args, **kwargs)
+        elapsed = (time.perf_counter() - start) * 1000
+        print(f"  [timed] {func.__name__} took {elapsed:.3f}ms")
+        return result
+    return wrapper
+
+
+def memoize(func):
+    cache = {}
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        key = (args, tuple(sorted(kwargs.items())))
+        display_args = args[1:] if args and hasattr(args[0], "__class__") else args
+        if key in cache:
+            print(f"  [cache] HIT for {func.__name__}{display_args}")
+            return cache[key]
+        print(f"  [cache] MISS for {func.__name__}{display_args} (computing...)")
+        result = func(*args, **kwargs)
+        cache[key] = result
+        return result
+
+    wrapper.clear_cache = cache.clear
+    return wrapper
+
+
+class Catalog:
+    def __init__(self):
+        self.products = {}       
+
+    def add_product(self, pid, name, category, tags):
+        self.products[pid] = {"name": name, "category": category, "tags": set(tags)}
+
+
+class PurchaseStore:
+    def __init__(self):
+        self.history = defaultdict(list) 
+
+    def record_purchase(self, user, pid):
+        self.history[user].append(pid)
+
+    def get_history(self, user):
+        return self.history.get(user, [])
+
+
+class RecommendationEngine:
+    def __init__(self, catalog: Catalog, purchases: PurchaseStore):
+        self.catalog = catalog
+        self.purchases = purchases
+
+    @memoize
+    def similarity(self, pid_a, pid_b):
+        if pid_a == pid_b:
+            return 1.0
+        tags_a = self.catalog.products[pid_a]["tags"]
+        tags_b = self.catalog.products[pid_b]["tags"]
+        if not tags_a or not tags_b:
+            return 0.0
+        intersection = len(tags_a & tags_b)
+        union = len(tags_a | tags_b)
+        return round(intersection / union, 3)
+
+    @timed
+    @memoize
+    def recommend_for_user(self, user, top_n=3):
+        bought = set(self.purchases.get_history(user))
+        if not bought:
+            return self.trending_products(top_n)
+
+        scores = defaultdict(float)
+        for candidate_pid in self.catalog.products:
+            if candidate_pid in bought:
+                continue
+            scores[candidate_pid] = sum(self.similarity(candidate_pid, b) for b in bought)
+
+        ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+        return [pid for pid, score in ranked[:top_n] if score > 0]
+
+    def trending_products(self, top_n=3):
+        counter = Counter()
+        for purchases in self.purchases.history.values():
+            counter.update(purchases)
+        return [pid for pid, _ in counter.most_common(top_n)]
+
+    def predict_cart_additions(self, current_cart, top_n=2):
+        cart_set = set(current_cart)
+        co_occurrence = Counter()
+        for history in self.purchases.history.values():
+            history_set = set(history)
+            if cart_set & history_set:  
+                for pid in history_set - cart_set:
+                    co_occurrence[pid] += 1
+        return [pid for pid, _ in co_occurrence.most_common(top_n)]
+
+
+def demo():
+    catalog = Catalog()
+    catalog.add_product("P1", "Running Shoes", "Footwear", ["sports", "running", "shoes"])
+    catalog.add_product("P2", "Yoga Mat", "Fitness", ["yoga", "fitness", "mat"])
+    catalog.add_product("P3", "Trail Running Shoes", "Footwear", ["sports", "running", "trail", "shoes"])
+    catalog.add_product("P4", "Dumbbell Set", "Fitness", ["fitness", "strength", "weights"])
+    catalog.add_product("P5", "Sports Water Bottle", "Accessories", ["sports", "hydration"])
+
+    purchases = PurchaseStore()
+    purchases.record_purchase("alice", "P1")
+    purchases.record_purchase("alice", "P5")
+    purchases.record_purchase("bob", "P2")
+    purchases.record_purchase("bob", "P4")
+    purchases.record_purchase("carol", "P1")
+    purchases.record_purchase("carol", "P3")
+    purchases.record_purchase("carol", "P5")
+
+    engine = RecommendationEngine(catalog, purchases)
+
+    print("=== Product similarity (cached after first call) ===")
+    print(f"  sim(P1, P3) = {engine.similarity('P1', 'P3')}")
+    print(f"  sim(P1, P3) again = {engine.similarity('P1', 'P3')}")  
+    print(f"  sim(P1, P2) = {engine.similarity('P1', 'P2')}")
+
+    print("\n=== Personalized recommendations for Alice ===")
+    recs = engine.recommend_for_user("alice")
+    print(f"  Recommended: {recs} -> {[catalog.products[p]['name'] for p in recs]}")
+    print("  Calling again (should hit memoize cache):")
+    engine.recommend_for_user("alice")
+
+    print("\n=== Trending products overall ===")
+    trending = engine.trending_products(top_n=3)
+    print(f"  Trending: {trending} -> {[catalog.products[p]['name'] for p in trending]}")
+
+    print("\n=== Shopping cart prediction ===")
+    cart = ["P1"]
+    predicted = engine.predict_cart_additions(cart)
+    print(f"  Cart: {cart} -> suggested additions: {predicted} -> "
+          f"{[catalog.products[p]['name'] for p in predicted]}")
+
+
+if __name__ == "__main__":
+    demo()

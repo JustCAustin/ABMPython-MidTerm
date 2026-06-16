@@ -1,0 +1,178 @@
+import math
+import os
+
+
+class ParseError(Exception):
+    pass
+
+
+def tokenize(expression):
+    tokens = []
+    i, n = 0, len(expression)
+    while i < n:
+        ch = expression[i]
+        if ch.isspace():
+            i += 1
+            continue
+        if ch in "+-*/%()":
+            tokens.append(ch)
+            i += 1
+            continue
+        if ch.isdigit() or ch == ".":
+            j = i
+            while j < n and (expression[j].isdigit() or expression[j] == "."):
+                j += 1
+            tokens.append(expression[i:j])
+            i = j
+            continue
+        raise ParseError(f"Unexpected character '{ch}' at position {i}")
+    return tokens
+
+
+class ExpressionParser:
+    def __init__(self, tokens):
+        self.tokens = tokens
+        self.pos = 0
+
+    def _peek(self):
+        return self.tokens[self.pos] if self.pos < len(self.tokens) else None
+
+    def _consume(self):
+        tok = self._peek()
+        self.pos += 1
+        return tok
+
+    def parse(self):
+        value = self._expr()
+        if self.pos != len(self.tokens):
+            raise ParseError(f"Unexpected token '{self._peek()}'")
+        return value
+
+    def _expr(self):
+        value = self._term()
+        while self._peek() in ("+", "-"):
+            op = self._consume()
+            rhs = self._term()
+            value = value + rhs if op == "+" else value - rhs
+        return value
+
+    def _term(self):
+        value = self._factor()
+        while self._peek() in ("*", "/", "%"):
+            op = self._consume()
+            rhs = self._factor()
+            if op == "*":
+                value = value * rhs
+            elif op == "/":
+                if rhs == 0:
+                    raise ZeroDivisionError("division by zero")
+                value = value / rhs
+            else:
+                value = value % rhs
+        return value
+
+    def _factor(self):
+        tok = self._peek()
+        if tok == "-":
+            self._consume()
+            return -self._factor()
+        if tok == "(":
+            self._consume()
+            value = self._expr()
+            if self._consume() != ")":
+                raise ParseError("Expected closing ')'")
+            return value
+        if tok is None:
+            raise ParseError("Unexpected end of expression")
+        self._consume()
+        try:
+            return float(tok) if "." in tok else int(tok)
+        except ValueError:
+            raise ParseError(f"Invalid number '{tok}'")
+
+
+def evaluate_expression(expression):
+    tokens = tokenize(expression)
+    return ExpressionParser(tokens).parse()
+
+
+class MiniShell:
+    BUILTINS = {"help", "clear", "history", "exit"}
+
+    def __init__(self):
+        self.history = []
+        self.running = True
+
+    def help_text(self):
+        return (
+            "Mini Shell - built-in commands:\n"
+            "  help              show this help message\n"
+            "  clear             clear command history\n"
+            "  history           show command history\n"
+            "  exit              quit the shell\n"
+            "  <expression>      evaluate arithmetic, e.g. (3 + 4) * 2 - 5 / 2"
+        )
+
+    def execute(self, line):
+        line = line.strip()
+        if not line:
+            return None
+        self.history.append(line)
+        command = line.split()[0]
+
+        if command == "help":
+            return self.help_text()
+        if command == "clear":
+            self.history.clear()
+            return "History cleared."
+        if command == "history":
+            return "\n".join(f"  {i + 1}: {cmd}" for i, cmd in enumerate(self.history)) or "(empty)"
+        if command == "exit":
+            self.running = False
+            return "Goodbye!"
+
+        try:
+            result = evaluate_expression(line)
+            return f"= {result}"
+        except (ParseError, ZeroDivisionError) as e:
+            return f"Error: {e}"
+
+    def run_interactive(self): 
+        print(self.help_text())
+        while self.running:
+            try:
+                line = input("shell> ")
+            except (EOFError, KeyboardInterrupt):
+                break
+            output = self.execute(line)
+            if output:
+                print(output)
+
+
+def demo():
+    shell = MiniShell()
+    print(shell.help_text())
+
+    commands = [
+        "3 + 4 * 2",
+        "(3 + 4) * 2",
+        "10 / 0",
+        "100 % 7",
+        "-5 + 3",
+        "history",
+        "clear",
+        "history",
+        "bad ++ syntax",
+        "exit",
+    ]
+
+    print("\n=== Running scripted commands through the shell ===")
+    for cmd in commands:
+        print(f"shell> {cmd}")
+        output = shell.execute(cmd)
+        if output:
+            print(output)
+
+
+if __name__ == "__main__":
+    demo()

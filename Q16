@@ -1,0 +1,133 @@
+class Block:
+    def __init__(self, start, size, process=None):
+        self.start = start
+        self.size = size
+        self.process = process  
+
+    @property
+    def end(self):
+        return self.start + self.size
+
+    @property
+    def is_free(self):
+        return self.process is None
+
+    def __repr__(self):
+        label = self.process if self.process else "FREE"
+        return f"[{self.start}-{self.end - 1}] size={self.size} {label}"
+
+
+class MemoryManager:
+    def __init__(self, total_size, strategy="first_fit"):
+        self.total_size = total_size
+        self.strategy = strategy
+        self.blocks = [Block(0, total_size)]  
+        self.allocation_log = []
+
+    def _find_block_index(self, size):
+        free_indices = [i for i, b in enumerate(self.blocks) if b.is_free and b.size >= size]
+        if not free_indices:
+            return None
+        if self.strategy == "first_fit":
+            return free_indices[0]
+        if self.strategy == "best_fit":
+            return min(free_indices, key=lambda i: self.blocks[i].size)
+        if self.strategy == "worst_fit":
+            return max(free_indices, key=lambda i: self.blocks[i].size)
+        raise ValueError(f"Unknown strategy: {self.strategy}")
+
+    def allocate(self, process_name, size):
+        idx = self._find_block_index(size)
+        if idx is None:
+            self.allocation_log.append((process_name, size, "FAILED - no suitable block"))
+            return False
+
+        block = self.blocks[idx]
+        if block.size == size:
+            block.process = process_name
+        else:
+            allocated = Block(block.start, size, process_name)
+            remainder = Block(block.start + size, block.size - size)
+            self.blocks[idx:idx + 1] = [allocated, remainder]
+
+        self.allocation_log.append((process_name, size, f"OK ({self.strategy})"))
+        return True
+
+    def deallocate(self, process_name):
+        found = False
+        for block in self.blocks:
+            if block.process == process_name:
+                block.process = None
+                found = True
+        if found:
+            self._merge_free_blocks()
+            self.allocation_log.append((process_name, None, "FREED"))
+        else:
+            self.allocation_log.append((process_name, None, "FAILED - not found"))
+        return found
+
+    def _merge_free_blocks(self):
+        merged = [self.blocks[0]]
+        for block in self.blocks[1:]:
+            last = merged[-1]
+            if last.is_free and block.is_free:
+                last.size += block.size
+            else:
+                merged.append(block)
+        self.blocks = merged
+
+    def fragmentation_stats(self):
+        free_blocks = [b for b in self.blocks if b.is_free]
+        total_free = sum(b.size for b in free_blocks)
+        largest_free = max((b.size for b in free_blocks), default=0)
+        fragmentation_pct = 0.0
+        if total_free > 0:
+            fragmentation_pct = round((1 - largest_free / total_free) * 100, 1)
+        return {
+            "num_free_blocks": len(free_blocks),
+            "total_free": total_free,
+            "largest_free_block": largest_free,
+            "external_fragmentation_pct": fragmentation_pct,
+        }
+
+    def display(self):
+        print(f"  Memory map ({self.strategy}):")
+        for b in self.blocks:
+            bar = "#" if not b.is_free else "."
+            print(f"    {b}")
+
+
+def run_strategy(strategy, requests):
+    mm = MemoryManager(total_size=100, strategy=strategy)
+    print(f"\n=== Strategy: {strategy.upper()} ===")
+    for action, name, size in requests:
+        if action == "alloc":
+            ok = mm.allocate(name, size)
+            print(f"  Allocate {name} ({size} units) -> {'OK' if ok else 'FAILED'}")
+        elif action == "free":
+            ok = mm.deallocate(name)
+            print(f"  Free {name} -> {'OK' if ok else 'FAILED'}")
+    mm.display()
+    stats = mm.fragmentation_stats()
+    print(f"  Fragmentation stats: {stats}")
+    return mm
+
+
+def demo():
+    requests = [
+        ("alloc", "P1", 20),
+        ("alloc", "P2", 15),
+        ("alloc", "P3", 25),
+        ("free", "P2", None),
+        ("alloc", "P4", 10),
+        ("alloc", "P5", 30),
+        ("free", "P1", None),
+        ("alloc", "P6", 18),
+    ]
+
+    for strategy in ["first_fit", "best_fit", "worst_fit"]:
+        run_strategy(strategy, requests)
+
+
+if __name__ == "__main__":
+    demo()

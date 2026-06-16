@@ -1,0 +1,163 @@
+import hashlib
+import os
+from abc import ABC, abstractmethod
+from datetime import datetime
+
+
+class WeakPasswordError(Exception):
+    pass
+
+
+class AuthorizationError(Exception):
+    pass
+
+
+def validate_password_strength(password):
+    if len(password) < 8:
+        raise WeakPasswordError("Password must be at least 8 characters long.")
+    if not any(c.isdigit() for c in password):
+        raise WeakPasswordError("Password must contain at least one digit.")
+    if not any(c.isalpha() for c in password):
+        raise WeakPasswordError("Password must contain at least one letter.")
+    return True
+
+
+class EncryptionStrategy(ABC):
+    @abstractmethod
+    def encrypt(self, data: bytes, password: str) -> bytes:
+        ...
+
+    @abstractmethod
+    def decrypt(self, data: bytes, password: str) -> bytes:
+        ...
+
+    @staticmethod
+    def _password_to_keystream(password: str, length: int) -> bytes:
+        digest = hashlib.sha256(password.encode()).digest()
+        return (digest * (length // len(digest) + 1))[:length]
+
+
+class XORCipherStrategy(EncryptionStrategy):
+
+    def encrypt(self, data, password):
+        keystream = self._password_to_keystream(password, len(data))
+        return bytes(b ^ k for b, k in zip(data, keystream))
+
+    def decrypt(self, data, password):
+        return self.encrypt(data, password)  
+
+
+class CaesarShiftStrategy(EncryptionStrategy):
+
+    def _shift_amount(self, password):
+        return (sum(password.encode()) % 255) + 1
+
+    def encrypt(self, data, password):
+        shift = self._shift_amount(password)
+        return bytes((b + shift) % 256 for b in data)
+
+    def decrypt(self, data, password):
+        shift = self._shift_amount(password)
+        return bytes((b - shift) % 256 for b in data)
+
+
+class FileEncryptor:
+    def __init__(self, strategy: EncryptionStrategy):
+        self.strategy = strategy            
+        self.log = []
+        self.password_hashes = {}           
+    def _log_event(self, action, filepath, status, detail=""):
+        self.log.append({
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "action": action,
+            "file": filepath,
+            "status": status,
+            "detail": detail,
+        })
+
+    def encrypt_file(self, filepath, password, out_path=None):
+        validate_password_strength(password)
+        out_path = out_path or filepath + ".enc"
+        with open(filepath, "rb") as f:
+            plaintext = f.read()
+        ciphertext = self.strategy.encrypt(plaintext, password)
+        with open(out_path, "wb") as f:
+            f.write(ciphertext)
+        self.password_hashes[out_path] = hashlib.sha256(password.encode()).hexdigest()
+        self._log_event("ENCRYPT", out_path, "SUCCESS", f"strategy={type(self.strategy).__name__}")
+        return out_path
+
+    def decrypt_file(self, enc_path, password, out_path=None):
+        stored_hash = self.password_hashes.get(enc_path)
+        if stored_hash and stored_hash != hashlib.sha256(password.encode()).hexdigest():
+            self._log_event("DECRYPT", enc_path, "DENIED", "Wrong password")
+            raise AuthorizationError("Incorrect password - access denied.")
+
+        out_path = out_path or enc_path.replace(".enc", ".dec")
+        with open(enc_path, "rb") as f:
+            ciphertext = f.read()
+        plaintext = self.strategy.decrypt(ciphertext, password)
+        with open(out_path, "wb") as f:
+            f.write(plaintext)
+        self._log_event("DECRYPT", enc_path, "SUCCESS")
+        return out_path
+
+    def print_log(self):
+        print("\n--- Encryption/Decryption Log ---")
+        for entry in self.log:
+            print(f"  [{entry['timestamp']}] {entry['action']:8s} {entry['file']:30s} "
+                  f"-> {entry['status']:8s} {entry['detail']}")
+
+
+def demo():
+    work_dir = "/tmp/file_encryption_demo"
+    os.makedirs(work_dir, exist_ok=True)
+    sample_path = os.path.join(work_dir, "secret_notes.txt")
+    with open(sample_path, "w") as f:
+        f.write("The treasure is buried under the old oak tree at midnight.\n")
+
+    print("=== Password validation ===")
+    try:
+        validate_password_strength("weak")
+    except WeakPasswordError as e:
+        print(f"  Rejected weak password: {e}")
+    good_password = "Treasure123"
+    print(f"  '{good_password}' passes validation: {validate_password_strength(good_password)}")
+
+    print("\n=== Strategy 1: XOR cipher ===")
+    xor_encryptor = FileEncryptor(XORCipherStrategy())
+    enc_path = xor_encryptor.encrypt_file(sample_path, good_password)
+    print(f"  Encrypted -> {enc_path}")
+
+    with open(enc_path, "rb") as f:
+        print(f"  Ciphertext (first 20 bytes): {f.read(20)}")
+
+    print("\n  Attempting decryption with WRONG password (should be denied):")
+    try:
+        xor_encryptor.decrypt_file(enc_path, "WrongPass123")
+    except AuthorizationError as e:
+        print(f"  {e}")
+
+    print("\n  Decrypting with correct password:")
+    dec_path = xor_encryptor.decrypt_file(enc_path, good_password)
+    with open(dec_path, "r") as f:
+        print(f"  Recovered text: {f.read().strip()}")
+
+    print("\n=== Strategy 2: Caesar shift cipher (polymorphic swap) ===")
+    caesar_encryptor = FileEncryptor(CaesarShiftStrategy())
+    enc_path2 = caesar_encryptor.encrypt_file(sample_path, good_password, out_path=sample_path + ".caesar.enc")
+    dec_path2 = caesar_encryptor.decrypt_file(enc_path2, good_password, out_path=sample_path + ".caesar.dec")
+    with open(dec_path2, "r") as f:
+        print(f"  Recovered via Caesar strategy: {f.read().strip()}")
+
+    xor_encryptor.print_log()
+    caesar_encryptor.print_log()
+
+   
+    for p in [sample_path, enc_path, dec_path, enc_path2, dec_path2]:
+        if os.path.exists(p):
+            os.remove(p)
+
+
+if __name__ == "__main__":
+    demo()

@@ -1,0 +1,159 @@
+import functools
+import random
+import time
+
+
+_current_user = {"name": None, "roles": set()}
+
+
+def login_as(name, roles):
+    _current_user["name"] = name
+    _current_user["roles"] = set(roles)
+
+
+def logout():
+    _current_user["name"] = None
+    _current_user["roles"] = set()
+
+
+class AuthenticationError(Exception):
+    pass
+
+
+def require_role(*allowed_roles):
+
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            if _current_user["name"] is None:
+                raise AuthenticationError(f"{func.__name__}: no user is logged in.")
+            if allowed_roles and not (_current_user["roles"] & set(allowed_roles)):
+                raise AuthenticationError(
+                    f"{func.__name__}: user '{_current_user['name']}' lacks required "
+                    f"role(s) {allowed_roles}."
+                )
+            return func(*args, **kwargs)
+        return wrapper
+    return decorator
+
+
+def log_calls(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        print(f"  [LOG] Calling {func.__name__}(args={args}, kwargs={kwargs})")
+        try:
+            result = func(*args, **kwargs)
+            print(f"  [LOG] {func.__name__} returned {result!r}")
+            return result
+        except Exception as e:
+            print(f"  [LOG] {func.__name__} raised {type(e).__name__}: {e}")
+            raise
+    return wrapper
+
+
+def timed(func):
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        start = time.perf_counter()
+        result = func(*args, **kwargs)
+        elapsed_ms = (time.perf_counter() - start) * 1000
+        print(f"  [TIME] {func.__name__} took {elapsed_ms:.3f}ms")
+        return result
+    return wrapper
+
+
+def retry(max_attempts=3, delay=0.05, exceptions=(Exception,)):
+
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            last_exception = None
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    return func(*args, **kwargs)
+                except exceptions as e:
+                    last_exception = e
+                    print(f"  [RETRY] {func.__name__} attempt {attempt}/{max_attempts} "
+                          f"failed: {e}")
+                    if attempt < max_attempts:
+                        time.sleep(delay)
+            raise last_exception
+        return wrapper
+    return decorator
+
+
+class ValidationError(Exception):
+    pass
+
+
+def validate_args(**validators):
+
+    def decorator(func):
+        import inspect
+        sig = inspect.signature(func)
+
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            bound = sig.bind(*args, **kwargs)
+            bound.apply_defaults()
+            for name, validator in validators.items():
+                if name in bound.arguments and not validator(bound.arguments[name]):
+                    raise ValidationError(f"{func.__name__}: argument '{name}'="
+                                           f"{bound.arguments[name]!r} failed validation.")
+            return func(*args, **kwargs)
+        return wrapper
+    return decorator
+
+
+@log_calls
+@timed
+@require_role("admin", "billing")
+@validate_args(amount=lambda v: v > 0)
+def process_refund(amount):
+    return f"Refunded ${amount:.2f}"
+
+
+_attempt_tracker = {"count": 0}
+
+
+@log_calls
+@retry(max_attempts=4, delay=0.02)
+def unreliable_network_call():
+    _attempt_tracker["count"] += 1
+    if _attempt_tracker["count"] < 3:
+        raise ConnectionError("simulated network blip")
+    return "data received"
+
+
+def demo():
+    print("=== Stacked decorators: log + timing + auth + validation ===")
+    login_as("alice", roles=["billing"])
+    print(process_refund(49.99))
+
+    print("\n--- Validation failure (negative amount) ---")
+    try:
+        process_refund(-5)
+    except ValidationError as e:
+        print(f"  Blocked: {e}")
+
+    print("\n--- Auth failure (wrong role) ---")
+    login_as("bob", roles=["support"])
+    try:
+        process_refund(20.0)
+    except AuthenticationError as e:
+        print(f"  Blocked: {e}")
+    logout()
+
+    print("\n--- No user logged in ---")
+    try:
+        process_refund(20.0)
+    except AuthenticationError as e:
+        print(f"  Blocked: {e}")
+
+    print("\n=== Stacked decorators: log + retry on a flaky function ===")
+    result = unreliable_network_call()
+    print(f"  Final result: {result}")
+
+
+if __name__ == "__main__":
+    demo()

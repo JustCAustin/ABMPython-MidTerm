@@ -1,0 +1,151 @@
+import random
+import threading
+import uuid
+from datetime import datetime
+
+
+class InvalidTransactionError(Exception):
+    pass
+
+
+class Account:
+    def __init__(self, owner, balance=0.0):
+        self.account_id = str(uuid.uuid4())[:8]
+        self.owner = owner
+        self.balance = balance
+        self.lock = threading.RLock()
+        self.history = []
+        self.history_lock = threading.Lock()
+
+    def _record(self, tx_type, amount, status, detail=""):
+        with self.history_lock:
+            self.history.append({
+                "tx_id": str(uuid.uuid4())[:8],
+                "type": tx_type,
+                "amount": amount,
+                "status": status,
+                "detail": detail,
+                "balance_after": self.balance,
+                "timestamp": datetime.now().strftime("%H:%M:%S.%f")[:-3],
+            })
+
+    def deposit(self, amount):
+        if amount <= 0:
+            self._record("DEPOSIT", amount, "INVALID", "Amount must be positive")
+            raise InvalidTransactionError("Deposit amount must be positive.")
+        with self.lock:
+            self.balance += amount
+            self._record("DEPOSIT", amount, "SUCCESS")
+
+    def withdraw(self, amount):
+        if amount <= 0:
+            self._record("WITHDRAW", amount, "INVALID", "Amount must be positive")
+            raise InvalidTransactionError("Withdrawal amount must be positive.")
+        with self.lock:
+            if amount > self.balance:
+                self._record("WITHDRAW", amount, "FAILED", "Insufficient funds")
+                raise InvalidTransactionError(
+                    f"Insufficient funds: balance={self.balance}, requested={amount}"
+                )
+            self.balance -= amount
+            self._record("WITHDRAW", amount, "SUCCESS")
+
+    def statement(self):
+        lines = [f"--- Statement for {self.owner} (Account {self.account_id}) ---"]
+        with self.history_lock:
+            for tx in self.history[-15:]: 
+                lines.append(f"  [{tx['timestamp']}] {tx['type']:8s} {tx['amount']:>8.2f} "
+                              f"-> {tx['status']:9s} (balance after: {tx['balance_after']:.2f}) {tx['detail']}")
+        lines.append(f"  Current balance: {self.balance:.2f}")
+        return "\n".join(lines)
+
+
+class Bank:
+    def __init__(self):
+        self.accounts = {}
+        self.global_log = []
+        self.global_log_lock = threading.Lock()
+
+    def open_account(self, owner, balance=0.0):
+        acc = Account(owner, balance)
+        self.accounts[acc.account_id] = acc
+        return acc
+
+    def transfer(self, from_id, to_id, amount):
+        from_acc, to_acc = self.accounts[from_id], self.accounts[to_id]
+        first, second = sorted([from_acc, to_acc], key=lambda a: a.account_id)
+        with first.lock, second.lock:
+            try:
+                from_acc.withdraw(amount)
+                to_acc.deposit(amount)
+                status = "SUCCESS"
+            except InvalidTransactionError as e:
+                status = f"FAILED: {e}"
+        with self.global_log_lock:
+            self.global_log.append(f"{from_acc.owner} -> {to_acc.owner}: {amount} [{status}]")
+        return status
+
+
+def stress_test(bank, accounts, num_transactions=120):
+    results = {"SUCCESS": 0, "FAILED": 0, "INVALID": 0}
+    results_lock = threading.Lock()
+
+    def random_op(i):
+        acc = random.choice(accounts)
+        if i % 11 == 0:
+            op, forced_amount = "withdraw", round(random.uniform(600, 1000), 2)  
+        elif i % 17 == 0:
+            op, forced_amount = random.choice(["deposit", "withdraw"]), -5.0     
+        else:
+            op, forced_amount = random.choice(["deposit", "withdraw", "transfer"]), None
+
+        try:
+            if op == "deposit":
+                amount = forced_amount if forced_amount is not None else round(random.uniform(1, 50), 2)
+                acc.deposit(amount)
+                outcome = "SUCCESS"
+            elif op == "withdraw":
+                amount = forced_amount if forced_amount is not None else round(random.uniform(1, 100), 2)
+                acc.withdraw(amount)
+                outcome = "SUCCESS"
+            else:
+                other = random.choice([a for a in accounts if a is not acc])
+                tx_status = bank.transfer(acc.account_id, other.account_id, round(random.uniform(1, 30), 2))
+                outcome = "SUCCESS" if tx_status == "SUCCESS" else "FAILED"
+        except InvalidTransactionError as e:
+            outcome = "INVALID" if forced_amount is not None and forced_amount < 0 else "FAILED"
+        with results_lock:
+            results[outcome] = results.get(outcome, 0) + 1
+
+    threads = [threading.Thread(target=random_op, args=(i,)) for i in range(num_transactions)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    return results
+
+
+def demo():
+    bank = Bank()
+    accounts = [bank.open_account(name, balance=500.0) for name in
+                ["Alice", "Bob", "Charlie", "Diana", "Evan"]]
+
+    total_before = sum(a.balance for a in accounts)
+    print(f"Opened {len(accounts)} accounts, total funds: {total_before:.2f}")
+
+    print("\n=== Firing 120 concurrent transactions across 5 accounts ===")
+    results = stress_test(bank, accounts, num_transactions=120)
+    print(f"Outcome counts: {results}")
+
+    total_after = sum(a.balance for a in accounts)
+    print(f"\nTotal funds before: {total_before:.2f}, after: {total_after:.2f} "
+          f"(difference is net new deposits, since withdrawals/transfers conserve funds)")
+
+    print(f"\nTotal transaction entries recorded across all accounts: "
+          f"{sum(len(a.history) for a in accounts)}")
+
+    print(f"\n{accounts[0].statement()}")
+
+
+if __name__ == "__main__":
+    demo()

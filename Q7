@@ -1,0 +1,195 @@
+import heapq
+import itertools
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+
+
+class NotificationService(ABC):
+    @abstractmethod
+    def notify(self, message: str):
+        ...
+
+
+class ConsoleNotificationService(NotificationService):
+    def notify(self, message: str):
+        print(f"  [NOTIFY] {message}")
+
+
+class BillingStrategy(ABC):
+    @abstractmethod
+    def calculate(self, services_rendered: list) -> float:
+        ...
+
+
+class StandardBillingStrategy(BillingStrategy):
+    def calculate(self, services_rendered):
+        return round(sum(s["cost"] for s in services_rendered), 2)
+
+
+class InsuranceBillingStrategy(BillingStrategy):
+    """Applies an insurance discount before totaling."""
+
+    def __init__(self, coverage_pct=0.7):
+        self.coverage_pct = coverage_pct
+
+    def calculate(self, services_rendered):
+        gross = sum(s["cost"] for s in services_rendered)
+        patient_owes = gross * (1 - self.coverage_pct)
+        return round(patient_owes, 2)
+
+
+@dataclass
+class Patient:
+    name: str
+    patient_id: str
+    medical_history: list = field(default_factory=list)
+
+    def add_record(self, note):
+        self.medical_history.append(f"{datetime.now().strftime('%Y-%m-%d %H:%M')}: {note}")
+
+
+@dataclass
+class Doctor:
+    name: str
+    specialty: str
+    schedule: list = field(default_factory=list)  
+
+    def is_free(self, start, end):
+        return all(end <= s or start >= e for s, e in self.schedule)
+
+    def book(self, start, end):
+        self.schedule.append((start, end))
+
+
+class EmergencyQueue:
+
+    def __init__(self):
+        self._heap = []
+        self._counter = itertools.count()  
+
+    def add_patient(self, patient: Patient, severity: int):
+        heapq.heappush(self._heap, (severity, next(self._counter), patient))
+
+    def next_patient(self):
+        if not self._heap:
+            return None
+        severity, _, patient = heapq.heappop(self._heap)
+        return patient, severity
+
+    def __len__(self):
+        return len(self._heap)
+
+
+class Pharmacy:
+    def __init__(self):
+        self.stock = {}
+
+    def stock_drug(self, name, quantity, unit_cost):
+        self.stock[name] = {"quantity": self.stock.get(name, {}).get("quantity", 0) + quantity,
+                             "unit_cost": unit_cost}
+
+    def dispense(self, name, quantity):
+        if name not in self.stock or self.stock[name]["quantity"] < quantity:
+            raise ValueError(f"Pharmacy cannot dispense {quantity}x {name}: insufficient stock.")
+        self.stock[name]["quantity"] -= quantity
+        cost = self.stock[name]["unit_cost"] * quantity
+        return round(cost, 2)
+
+
+class DoctorScheduler:
+    def __init__(self, doctors: list):
+        self.doctors = doctors
+
+    def find_doctor(self, specialty, start, duration_minutes=30):
+        end = start + timedelta(minutes=duration_minutes)
+        candidates = [d for d in self.doctors if d.specialty == specialty and d.is_free(start, end)]
+        if not candidates:
+            return None
+        
+        best = min(candidates, key=lambda d: len(d.schedule))
+        best.book(start, end)
+        return best
+
+
+class BillingService:
+
+    def __init__(self, strategy: BillingStrategy, notifier: NotificationService):
+        self.strategy = strategy
+        self.notifier = notifier
+
+    def generate_bill(self, patient: Patient, services_rendered: list):
+        total = self.strategy.calculate(services_rendered)
+        self.notifier.notify(f"Bill generated for {patient.name}: ${total:.2f}")
+        return total
+
+
+class Hospital:
+    def __init__(self, scheduler: DoctorScheduler, pharmacy: Pharmacy,
+                 billing_service: BillingService, notifier: NotificationService):
+        self.scheduler = scheduler
+        self.pharmacy = pharmacy
+        self.billing = billing_service
+        self.notifier = notifier
+        self.emergency_queue = EmergencyQueue()
+        self.patients = {}
+
+    def admit_patient(self, patient: Patient, severity: int):
+        self.patients[patient.patient_id] = patient
+        self.emergency_queue.add_patient(patient, severity)
+        self.notifier.notify(f"{patient.name} admitted with severity {severity}")
+
+    def treat_next(self):
+        result = self.emergency_queue.next_patient()
+        if result is None:
+            return None
+        patient, severity = result
+        patient.add_record(f"Treated in ER (severity {severity})")
+        self.notifier.notify(f"Now treating {patient.name} (severity {severity})")
+        return patient
+
+
+def demo():
+    notifier = ConsoleNotificationService()
+    doctors = [Doctor("Dr. House", "Diagnostics"), Doctor("Dr. Grey", "Surgery"), Doctor("Dr. Wilson", "Diagnostics")]
+    scheduler = DoctorScheduler(doctors)
+    pharmacy = Pharmacy()
+    pharmacy.stock_drug("Amoxicillin", 100, 0.50)
+    pharmacy.stock_drug("Morphine", 20, 5.00)
+
+    billing = BillingService(InsuranceBillingStrategy(coverage_pct=0.6), notifier)
+    hospital = Hospital(scheduler, pharmacy, billing, notifier)
+
+    print("=== Admitting patients to the ER ===")
+    p1 = Patient("John Doe", "P001")
+    p2 = Patient("Mary Smith", "P002")
+    p3 = Patient("Sam Lee", "P003")
+    hospital.admit_patient(p1, severity=3)
+    hospital.admit_patient(p2, severity=1)  
+    hospital.admit_patient(p3, severity=2)
+
+    print("\n=== Treating patients in priority order ===")
+    while len(hospital.emergency_queue) > 0:
+        hospital.treat_next()
+
+    print("\n=== Doctor scheduling ===")
+    appt_time = datetime.now() + timedelta(hours=1)
+    doc = scheduler.find_doctor("Diagnostics", appt_time)
+    print(f"  Booked {doc.name} for {p1.name} at {appt_time.strftime('%H:%M')}")
+
+    print("\n=== Pharmacy dispensing ===")
+    drug_cost = pharmacy.dispense("Amoxicillin", 20)
+    print(f"  Dispensed 20x Amoxicillin, cost=${drug_cost}")
+
+    print("\n=== Billing (insurance strategy) ===")
+    services = [{"name": "ER visit", "cost": 500.0}, {"name": "Amoxicillin", "cost": drug_cost}]
+    total_due = hospital.billing.generate_bill(p1, services)
+    print(f"  Patient owes after insurance: ${total_due}")
+
+    print(f"\n=== {p1.name}'s medical history ===")
+    for entry in p1.medical_history:
+        print(f"  {entry}")
+
+
+if __name__ == "__main__":
+    demo()

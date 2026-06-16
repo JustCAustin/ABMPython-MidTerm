@@ -1,0 +1,173 @@
+import os
+import re
+
+
+class HashTable:
+    def __init__(self, capacity=64):
+        self.capacity = capacity
+        self.buckets = [[] for _ in range(capacity)]
+        self.size = 0
+
+    def _hash(self, key: str) -> int:
+        h = 0
+        prime = 31
+        for ch in key:
+            h = (h * prime + ord(ch)) % (2 ** 32)
+        return h % self.capacity
+
+    def _resize(self):
+        old_items = self.items()
+        self.capacity *= 2
+        self.buckets = [[] for _ in range(self.capacity)]
+        self.size = 0
+        for k, v in old_items:
+            self.put(k, v)
+
+    def put(self, key, value):
+        if self.size >= self.capacity * 0.75:
+            self._resize()
+        idx = self._hash(key)
+        bucket = self.buckets[idx]
+        for i, (k, _) in enumerate(bucket):
+            if k == key:
+                bucket[i] = (k, value)
+                return
+        bucket.append((key, value))
+        self.size += 1
+
+    def get(self, key, default=None):
+        idx = self._hash(key)
+        for k, v in self.buckets[idx]:
+            if k == key:
+                return v
+        return default
+
+    def contains(self, key):
+        idx = self._hash(key)
+        return any(k == key for k, _ in self.buckets[idx])
+
+    def keys(self):
+        return [k for bucket in self.buckets for k, _ in bucket]
+
+    def items(self):
+        return [(k, v) for bucket in self.buckets for k, v in bucket]
+
+    def __len__(self):
+        return self.size
+
+
+WORD_RE = re.compile(r"[a-zA-Z']+")
+
+
+def tokenize(text):
+    return [w.lower() for w in WORD_RE.findall(text)]
+
+
+class SearchEngine:
+
+    def __init__(self):
+        self.index = HashTable(capacity=128)
+        self.documents = {}  
+    def index_file(self, filepath):
+        doc_name = os.path.basename(filepath)
+        with open(filepath, "r") as f:
+            text = f.read()
+        self.documents[doc_name] = text
+
+        words = tokenize(text)
+        term_counts = HashTable(capacity=64)
+        for word in words:
+            term_counts.put(word, term_counts.get(word, 0) + 1)
+
+        for word, count in term_counts.items():
+            postings = self.index.get(word)
+            if postings is None:
+                postings = HashTable(capacity=8)
+                self.index.put(word, postings)
+            postings.put(doc_name, count)
+
+    def index_directory(self, directory):
+        for filename in sorted(os.listdir(directory)):
+            if filename.endswith(".txt"):
+                self.index_file(os.path.join(directory, filename))
+
+    def search(self, query, top_n=5):
+        terms = tokenize(query)
+        if not terms:
+            return []
+
+        doc_scores = {}
+        for term in terms:
+            postings = self.index.get(term)
+            if postings is None:
+                return []  
+            term_docs = dict(postings.items())
+            if not doc_scores:
+                doc_scores = dict(term_docs)
+            else:
+                
+                doc_scores = {
+                    doc: doc_scores[doc] + term_docs[doc]
+                    for doc in doc_scores if doc in term_docs
+                }
+            if not doc_scores:
+                return []
+
+        ranked = sorted(doc_scores.items(), key=lambda kv: kv[1], reverse=True)
+        return ranked[:top_n]
+
+    def snippet(self, doc_name, query, width=60):
+        text = self.documents.get(doc_name, "")
+        terms = tokenize(query)
+        lower_text = text.lower()
+        pos = min((lower_text.find(t) for t in terms if lower_text.find(t) != -1), default=-1)
+        if pos == -1:
+            return text[:width].strip() + "..."
+        start = max(0, pos - width // 2)
+        return "..." + text[start:start + width].replace("\n", " ").strip() + "..."
+
+
+def create_sample_corpus(directory):
+    os.makedirs(directory, exist_ok=True)
+    docs = {
+        "doc1.txt": "Python is a popular programming language known for readability "
+                    "and a large standard library. Many data science teams use Python.",
+        "doc2.txt": "Search engines build an inverted index mapping words to documents. "
+                    "A good search engine ranks documents by relevance to the query.",
+        "doc3.txt": "Hash tables provide fast lookup using a hash function. Python "
+                    "dictionaries are themselves implemented using hash tables internally.",
+        "doc4.txt": "Data structures like hash tables, trees, and graphs are foundational "
+                    "to computer science and are used heavily when building a search index.",
+    }
+    for name, content in docs.items():
+        with open(os.path.join(directory, name), "w") as f:
+            f.write(content)
+
+
+def demo():
+    corpus_dir = "/tmp/search_engine_corpus"
+    create_sample_corpus(corpus_dir)
+
+    engine = SearchEngine()
+    engine.index_directory(corpus_dir)
+    print(f"Indexed {len(engine.documents)} documents, "
+          f"{len(engine.index)} unique terms (custom hash table)")
+
+    queries = ["python", "hash tables", "search engine index", "nonexistentword"]
+    for q in queries:
+        print(f"\n=== Query: '{q}' ===")
+        results = engine.search(q)
+        if not results:
+            print("  No matching documents.")
+            continue
+        for doc_name, score in results:
+            snippet = engine.snippet(doc_name, q)
+            print(f"  {doc_name} (score={score}): {snippet}")
+
+    for f in os.listdir(corpus_dir):
+        os.remove(os.path.join(corpus_dir, f))
+    os.rmdir(corpus_dir)
+
+
+if __name__ == "__main__":
+    demo()

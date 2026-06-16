@@ -1,0 +1,208 @@
+import hashlib
+import random
+import time
+import uuid
+from datetime import datetime
+
+
+class AuthenticationError(Exception):
+    pass
+
+
+class UserAccount:
+    def __init__(self, username, password):
+        self.username = username
+        self.password_hash = self._hash(password)
+
+    @staticmethod
+    def _hash(password):
+        return hashlib.sha256(password.encode()).hexdigest()
+
+    def verify(self, password):
+        return self.password_hash == self._hash(password)
+
+
+class AuthService:
+
+    def __init__(self):
+        self.users = {}
+
+    def register(self, username, password):
+        if username in self.users:
+            raise ValueError("Username already exists.")
+        self.users[username] = UserAccount(username, password)
+
+    def login(self, username, password):
+        user = self.users.get(username)
+        if not user or not user.verify(password):
+            raise AuthenticationError("Invalid username or password.")
+        return user
+
+
+class Question:
+    def __init__(self, text, options, correct_index, marks=4, negative_marks=1):
+        self.qid = str(uuid.uuid4())[:6]
+        self.text = text
+        self.options = options
+        self.correct_index = correct_index
+        self.marks = marks
+        self.negative_marks = negative_marks
+
+    def is_correct(self, chosen_index):
+        return chosen_index == self.correct_index
+
+
+class Exam:
+    def __init__(self, title, questions, duration_seconds, num_questions_to_pick=None):
+        self.exam_id = str(uuid.uuid4())[:8]
+        self.title = title
+        self.all_questions = questions
+        self.duration_seconds = duration_seconds
+        self.num_questions_to_pick = num_questions_to_pick or len(questions)
+
+    def generate_question_set(self):
+        pool = self.all_questions[:]
+        random.shuffle(pool)
+        return pool[: self.num_questions_to_pick]
+
+
+class ExamAttempt:
+    def __init__(self, exam: Exam, username):
+        self.attempt_id = str(uuid.uuid4())[:8]
+        self.exam = exam
+        self.username = username
+        self.questions = exam.generate_question_set()
+        self.answers = {}              
+        self.start_time = time.time()
+        self.submitted = False
+        self.auto_submitted = False
+        self.score = None
+
+    def time_remaining(self):
+        elapsed = time.time() - self.start_time
+        return max(0, self.exam.duration_seconds - elapsed)
+
+    def answer(self, qid, chosen_index):
+        if self.submitted:
+            raise RuntimeError("Exam already submitted.")
+        if self.time_remaining() <= 0:
+            self.submit(auto=True)
+            raise RuntimeError("Time is up - exam was auto-submitted.")
+        self.answers[qid] = chosen_index
+
+    def submit(self, auto=False):
+        if self.submitted:
+            return self.score
+        self.submitted = True
+        self.auto_submitted = auto
+        total = 0
+        for q in self.questions:
+            chosen = self.answers.get(q.qid)
+            if chosen is None:
+                continue  
+            elif q.is_correct(chosen):
+                total += q.marks
+            else:
+                total -= q.negative_marks
+        self.score = total
+        return total
+
+    def result_summary(self):
+        attempted = len(self.answers)
+        correct = sum(1 for q in self.questions if self.answers.get(q.qid) == q.correct_index)
+        wrong = attempted - correct
+        max_possible = sum(q.marks for q in self.questions)
+        return {
+            "attempt_id": self.attempt_id,
+            "exam": self.exam.title,
+            "username": self.username,
+            "score": self.score,
+            "max_possible": max_possible,
+            "attempted": attempted,
+            "correct": correct,
+            "wrong": wrong,
+            "unattempted": len(self.questions) - attempted,
+            "auto_submitted": self.auto_submitted,
+        }
+
+
+class ExaminationPlatform:
+    def __init__(self):
+        self.auth = AuthService()
+        self.exams = {}
+        self.completed_attempts = {}  
+
+    def add_exam(self, exam: Exam):
+        self.exams[exam.exam_id] = exam
+
+    def start_attempt(self, username, password, exam_id):
+        self.auth.login(username, password)  
+        key = (username, exam_id)
+        if key in self.completed_attempts:
+            raise PermissionError(f"User '{username}' has already attempted this exam.")
+        exam = self.exams[exam_id]
+        attempt = ExamAttempt(exam, username)
+        return attempt
+
+    def finalize(self, attempt: ExamAttempt):
+        attempt.submit()
+        self.completed_attempts[(attempt.username, attempt.exam.exam_id)] = attempt
+        return attempt.result_summary()
+
+
+def demo():
+    platform = ExaminationPlatform()
+    platform.auth.register("alice", "secret123")
+    platform.auth.register("bob", "hunter2")
+
+    questions = [
+        Question("Capital of France?", ["Berlin", "Madrid", "Paris", "Rome"], 2),
+        Question("2 + 2 * 2 = ?", ["6", "8", "4", "2"], 0),
+        Question("Largest planet?", ["Earth", "Jupiter", "Mars", "Venus"], 1),
+        Question("HTTP status for Not Found?", ["200", "301", "404", "500"], 2),
+        Question("Python creator?", ["Guido van Rossum", "James Gosling", "Bjarne Stroustrup", "Dennis Ritchie"], 0),
+    ]
+    exam = Exam("General Knowledge Quiz", questions, duration_seconds=120, num_questions_to_pick=4)
+    platform.add_exam(exam)
+
+    print("=== Alice attempts the exam ===")
+    attempt = platform.start_attempt("alice", "secret123", exam.exam_id)
+    print(f"  Randomized order for Alice: {[q.text[:20] for q in attempt.questions]}")
+    for q in attempt.questions[:3]:
+        attempt.answer(q.qid, q.correct_index)   
+   
+    last_q = attempt.questions[3]
+    wrong_choice = (last_q.correct_index + 1) % len(last_q.options)
+    attempt.answer(last_q.qid, wrong_choice)
+
+    result = platform.finalize(attempt)
+    print(f"  Result: {result}")
+
+    print("\n=== Alice tries to attempt the same exam again (should be blocked) ===")
+    try:
+        platform.start_attempt("alice", "secret123", exam.exam_id)
+    except PermissionError as e:
+        print(f"  Blocked as expected: {e}")
+
+    print("\n=== Bob attempts with wrong password (should fail auth) ===")
+    try:
+        platform.start_attempt("bob", "wrongpass", exam.exam_id)
+    except AuthenticationError as e:
+        print(f"  Blocked as expected: {e}")
+
+    print("\n=== Bob attempts the exam, runs out of time (auto-submit) ===")
+    short_exam = Exam("Speed Round", questions, duration_seconds=1, num_questions_to_pick=3)
+    platform.add_exam(short_exam)
+    bob_attempt = platform.start_attempt("bob", "hunter2", short_exam.exam_id)
+    bob_attempt.answer(bob_attempt.questions[0].qid, bob_attempt.questions[0].correct_index)
+    time.sleep(1.2)
+    try:
+        bob_attempt.answer(bob_attempt.questions[1].qid, bob_attempt.questions[1].correct_index)
+    except RuntimeError as e:
+        print(f"  {e}")
+    result_bob = platform.finalize(bob_attempt)
+    print(f"  Result: {result_bob}")
+
+
+if __name__ == "__main__":
+    demo()

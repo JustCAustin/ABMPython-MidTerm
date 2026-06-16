@@ -1,0 +1,201 @@
+from collections import defaultdict
+from datetime import datetime
+
+
+class Product:
+    def __init__(self, sku, name, price, low_stock_threshold=5):
+        self.sku = sku
+        self.name = name
+        self.price = price
+        self.low_stock_threshold = low_stock_threshold
+
+    def __repr__(self):
+        return f"Product({self.sku}, {self.name}, ${self.price:.2f})"
+
+
+class Inventory:
+
+    def __init__(self, stock=None):
+        self.stock = defaultdict(int, stock or {})
+
+    def __add__(self, other):
+        if not isinstance(other, Inventory):
+            return NotImplemented
+        merged = defaultdict(int, self.stock)
+        for sku, qty in other.stock.items():
+            merged[sku] += qty
+        return Inventory(merged)
+
+    def __iadd__(self, other):
+        if not isinstance(other, Inventory):
+            return NotImplemented
+        for sku, qty in other.stock.items():
+            self.stock[sku] += qty
+        return self
+
+    def __sub__(self, other):
+        if not isinstance(other, Inventory):
+            return NotImplemented
+        result = defaultdict(int, self.stock)
+        for sku, qty in other.stock.items():
+            result[sku] -= qty
+        return Inventory(result)
+
+    def __len__(self):
+        return sum(self.stock.values())
+
+    def __getitem__(self, sku):
+        return self.stock[sku]
+
+    def __repr__(self):
+        return f"Inventory({dict(self.stock)})"
+
+
+class Warehouse:
+    def __init__(self, warehouse_id, location):
+        self.warehouse_id = warehouse_id
+        self.location = location
+        self.inventory = Inventory()
+        self.sales_log = []  
+
+    def receive_stock(self, product: Product, quantity: int):
+        self.inventory.stock[product.sku] += quantity
+
+    def sell(self, product: Product, quantity: int):
+        available = self.inventory[product.sku]
+        if available < quantity:
+            raise ValueError(
+                f"Cannot sell {quantity} of {product.sku} from {self.warehouse_id}: "
+                f"only {available} in stock."
+            )
+        self.inventory.stock[product.sku] -= quantity
+        revenue = quantity * product.price
+        self.sales_log.append((product.sku, quantity, revenue, datetime.now()))
+        return revenue
+
+    def low_stock_alerts(self, catalog):
+        alerts = []
+        for sku, qty in self.inventory.stock.items():
+            product = catalog.get(sku)
+            if product and qty <= product.low_stock_threshold:
+                alerts.append((sku, product.name, qty, product.low_stock_threshold))
+        return alerts
+
+    def report(self, catalog):
+        lines = [f"--- Inventory Report: {self.warehouse_id} ({self.location}) ---"]
+        for sku, qty in sorted(self.inventory.stock.items()):
+            name = catalog[sku].name if sku in catalog else "Unknown"
+            lines.append(f"  {sku:8s} {name:20s} qty={qty}")
+        lines.append(f"  Total units on hand: {len(self.inventory)}")
+        return "\n".join(lines)
+
+
+class WarehouseNetwork:
+
+    def __init__(self):
+        self.catalog = {}           
+        self.warehouses = {}        
+
+    def register_product(self, product: Product):
+        self.catalog[product.sku] = product
+
+    def add_warehouse(self, warehouse_id, location):
+        wh = Warehouse(warehouse_id, location)
+        self.warehouses[warehouse_id] = wh
+        return wh
+
+    def transfer_stock(self, from_id, to_id, sku, quantity):
+        src, dst = self.warehouses[from_id], self.warehouses[to_id]
+        available = src.inventory[sku]
+        if available < quantity:
+            raise ValueError(f"Transfer failed: {from_id} only has {available} units of {sku}.")
+        src.inventory.stock[sku] -= quantity
+        dst.inventory.stock[sku] += quantity
+        return True
+
+    def auto_rebalance(self, sku):
+        product = self.catalog.get(sku)
+        if not product:
+            return None
+        levels = {wid: wh.inventory[sku] for wid, wh in self.warehouses.items()}
+        donor_id = max(levels, key=levels.get)
+        receiver_id = min(levels, key=levels.get)
+        if donor_id == receiver_id:
+            return None
+        if levels[receiver_id] > product.low_stock_threshold:
+            return None  
+        transferable = (levels[donor_id] - levels[receiver_id]) // 2
+        if transferable <= 0:
+            return None
+        self.transfer_stock(donor_id, receiver_id, sku, transferable)
+        return (donor_id, receiver_id, transferable)
+
+    def network_inventory(self):
+        total = Inventory()
+        for wh in self.warehouses.values():
+            total += wh.inventory
+        return total
+
+    def sales_analytics(self):
+        total_units, total_revenue = 0, 0.0
+        per_sku = defaultdict(lambda: [0, 0.0])
+        for wh in self.warehouses.values():
+            for sku, qty, revenue, _ in wh.sales_log:
+                total_units += qty
+                total_revenue += revenue
+                per_sku[sku][0] += qty
+                per_sku[sku][1] += revenue
+        return {
+            "total_units_sold": total_units,
+            "total_revenue": round(total_revenue, 2),
+            "per_sku": {sku: {"units": u, "revenue": round(r, 2)} for sku, (u, r) in per_sku.items()},
+        }
+
+
+def demo():
+    network = WarehouseNetwork()
+    laptop = Product("SKU-LAP1", "Laptop", 899.99, low_stock_threshold=3)
+    mouse = Product("SKU-MOU1", "Wireless Mouse", 24.99, low_stock_threshold=10)
+    network.register_product(laptop)
+    network.register_product(mouse)
+
+    east = network.add_warehouse("WH-EAST", "New Jersey")
+    west = network.add_warehouse("WH-WEST", "Reno")
+
+    east.receive_stock(laptop, 12)
+    east.receive_stock(mouse, 40)
+    west.receive_stock(laptop, 1)
+    west.receive_stock(mouse, 5)
+
+    print(east.report(network.catalog))
+    print()
+    print(west.report(network.catalog))
+
+    print("\n=== Selling some units ===")
+    print(f"Sold 2 laptops at WEST for ${west.sell(laptop, 2 if west.inventory[laptop.sku] >= 2 else 1):.2f}")
+    print(f"Sold 5 laptops at EAST for ${east.sell(laptop, 5):.2f}")
+    print(f"Sold 20 mice at EAST for ${east.sell(mouse, 20):.2f}")
+
+    print("\n=== Low stock alerts ===")
+    for wid, wh in network.warehouses.items():
+        for alert in wh.low_stock_alerts(network.catalog):
+            print(f"  [ALERT] {wid}: {alert[1]} ({alert[0]}) qty={alert[2]} <= threshold {alert[3]}")
+
+    print("\n=== Auto-rebalance laptops ===")
+    result = network.auto_rebalance(laptop.sku)
+    print(f"  Rebalance result: {result}")
+
+    print("\n=== Merged network inventory (operator overloading: wh1.inventory + wh2.inventory) ===")
+    merged = east.inventory + west.inventory
+    print(f"  {merged}  (total units via len(): {len(merged)})")
+
+    print("\n=== Sales analytics ===")
+    analytics = network.sales_analytics()
+    print(f"  Total units sold: {analytics['total_units_sold']}")
+    print(f"  Total revenue: ${analytics['total_revenue']}")
+    for sku, stats in analytics["per_sku"].items():
+        print(f"    {sku}: {stats['units']} units, ${stats['revenue']} revenue")
+
+
+if __name__ == "__main__":
+    demo()

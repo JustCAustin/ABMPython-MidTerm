@@ -1,0 +1,208 @@
+import threading
+import time
+import uuid
+from datetime import datetime
+from enum import Enum
+
+
+class DatabaseConnection:
+
+    _instance = None
+    _lock = threading.Lock()
+
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            with cls._lock:
+                if cls._instance is None:
+                    cls._instance = super().__new__(cls)
+                    cls._instance._initialized = False
+        return cls._instance
+
+    def __init__(self):
+        if self._initialized:
+            return
+        self._initialized = True
+        self.connection_id = str(uuid.uuid4())[:8]
+        self._log_lock = threading.Lock()
+        self.transaction_log = []
+        print(f"[DatabaseConnection] New connection established: {self.connection_id}")
+
+    def log_transaction(self, entry: str):
+        with self._log_lock:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+            self.transaction_log.append(f"[{timestamp}] {entry}")
+
+    def dump_log(self):
+        print("\n--- Transaction Log (via singleton DB connection) ---")
+        for line in self.transaction_log:
+            print(line)
+
+
+class TransactionStatus(Enum):
+    PENDING = "PENDING"
+    COMMITTED = "COMMITTED"
+    ROLLED_BACK = "ROLLED_BACK"
+
+
+class InsufficientFundsError(Exception):
+    pass
+
+
+class Account:
+
+    def __init__(self, account_id, owner, balance=0.0):
+        self.account_id = account_id
+        self.owner = owner
+        self.balance = balance
+        self.lock = threading.RLock()
+
+    def deposit(self, amount):
+        with self.lock:
+            self.balance += amount
+
+    def withdraw(self, amount):
+        with self.lock:
+            if amount > self.balance:
+                raise InsufficientFundsError(
+                    f"Account {self.account_id} has insufficient funds "
+                    f"(balance={self.balance}, requested={amount})"
+                )
+            self.balance -= amount
+
+    def __str__(self):
+        return f"Account[{self.account_id}] owner={self.owner} balance={self.balance:.2f}"
+
+
+class Branch:
+
+    def __init__(self, branch_id, name):
+        self.branch_id = branch_id
+        self.name = name
+        self.accounts = {}
+
+    def open_account(self, owner, initial_balance=0.0):
+        account_id = f"{self.branch_id}-{len(self.accounts) + 1:04d}"
+        account = Account(account_id, owner, initial_balance)
+        self.accounts[account_id] = account
+        return account
+
+    def get_account(self, account_id):
+        return self.accounts.get(account_id)
+
+
+class Transaction:
+
+    def __init__(self, from_account: Account, to_account: Account, amount: float, db: DatabaseConnection):
+        self.tx_id = str(uuid.uuid4())[:8]
+        self.from_account = from_account
+        self.to_account = to_account
+        self.amount = amount
+        self.status = TransactionStatus.PENDING
+        self.db = db
+        self._snapshot = None
+
+    def _take_snapshot(self):
+        self._snapshot = (self.from_account.balance, self.to_account.balance)
+
+    def _restore_snapshot(self):
+        self.from_account.balance, self.to_account.balance = self._snapshot
+
+    def execute(self):
+        first, second = sorted(
+            [self.from_account, self.to_account], key=lambda a: a.account_id
+        )
+        with first.lock, second.lock:
+            self._take_snapshot()
+            try:
+                self.from_account.withdraw(self.amount)
+                self.to_account.deposit(self.amount)
+                self.status = TransactionStatus.COMMITTED
+                self.db.log_transaction(
+                    f"TX {self.tx_id} COMMITTED: {self.amount:.2f} "
+                    f"{self.from_account.account_id} -> {self.to_account.account_id}"
+                )
+            except InsufficientFundsError as e:
+                self._restore_snapshot()
+                self.status = TransactionStatus.ROLLED_BACK
+                self.db.log_transaction(f"TX {self.tx_id} ROLLED BACK: {e}")
+                raise
+
+
+class Bank:
+
+    def __init__(self, name):
+        self.name = name
+        self.branches = {}
+        self.db = DatabaseConnection()  
+
+    def add_branch(self, branch_id, branch_name):
+        branch = Branch(branch_id, branch_name)
+        self.branches[branch_id] = branch
+        return branch
+
+    def find_account(self, account_id):
+        for branch in self.branches.values():
+            account = branch.get_account(account_id)
+            if account:
+                return account
+        return None
+
+    def transfer(self, from_account_id, to_account_id, amount):
+        from_acc = self.find_account(from_account_id)
+        to_acc = self.find_account(to_account_id)
+        if not from_acc or not to_acc:
+            raise ValueError("Invalid account id(s) for transfer.")
+        tx = Transaction(from_acc, to_acc, amount, self.db)
+        try:
+            tx.execute()
+        except InsufficientFundsError as e:
+            print(f"  [!] Transfer failed ({from_account_id} -> {to_account_id}): {e}")
+        return tx
+
+
+def demo():
+    bank = Bank("Global Trust Bank")
+    downtown = bank.add_branch("DT", "Downtown Branch")
+    uptown = bank.add_branch("UT", "Uptown Branch")
+
+    a1 = downtown.open_account("Alice", 1000.0)
+    a2 = uptown.open_account("Bob", 500.0)
+    a3 = downtown.open_account("Charlie", 200.0)
+
+    print(f"Opened: {a1}\nOpened: {a2}\nOpened: {a3}\n")
+
+    def worker(label, frm, to, amount, repeats):
+        for _ in range(repeats):
+            bank.transfer(frm, to, amount)
+
+    threads = [
+        threading.Thread(target=worker, args=("T1", a1.account_id, a2.account_id, 10, 20)),
+        threading.Thread(target=worker, args=("T2", a2.account_id, a1.account_id, 5, 20)),
+        threading.Thread(target=worker, args=("T3", a1.account_id, a3.account_id, 3, 15)),
+        threading.Thread(target=worker, args=("T4", a3.account_id, a1.account_id, 100, 5)),  
+    ]
+
+    start = time.time()
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    elapsed = time.time() - start
+
+    print(f"\nAll concurrent transactions complete in {elapsed:.3f}s")
+    print(f"Final {a1}")
+    print(f"Final {a2}")
+    print(f"Final {a3}")
+
+    total = a1.balance + a2.balance + a3.balance
+    print(f"\nTotal funds in system: {total:.2f} (started at 1700.00) -> "
+          f"{'OK, no money created/destroyed' if abs(total - 1700.0) < 1e-6 else 'MISMATCH!'}")
+
+    bank.db.dump_log()
+
+    db2 = DatabaseConnection()
+    print(f"\nSingleton check: bank.db is db2 -> {bank.db is db2}")
+
+
+if __name__ == "__main__":
+    demo()

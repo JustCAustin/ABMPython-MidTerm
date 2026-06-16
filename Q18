@@ -1,0 +1,149 @@
+import queue
+import random
+import threading
+import time
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+
+
+@dataclass(order=True)
+class _QueuedTask:
+    sort_key: tuple = field(compare=True)
+    task: "Task" = field(compare=False)
+
+
+class Task:
+    def __init__(self, name, action, priority=5, run_at=None, max_retries=3):
+        self.name = name
+        self.action = action           
+        self.priority = priority        
+        self.run_at = run_at or datetime.now()
+        self.max_retries = max_retries
+        self.attempts = 0
+        self.status = "PENDING"
+
+    def __repr__(self):
+        return f"Task({self.name}, priority={self.priority}, status={self.status})"
+
+
+class TaskScheduler:
+    def __init__(self, num_workers=3):
+        self.task_queue = queue.PriorityQueue()
+        self.num_workers = num_workers
+        self.log = []
+        self.log_lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._counter = 0
+        self._counter_lock = threading.Lock()
+
+    def _log(self, message):
+        with self.log_lock:
+            timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            entry = f"[{timestamp}] {message}"
+            self.log.append(entry)
+            print(f"  {entry}")
+
+    def schedule(self, task: Task):
+        with self._counter_lock:
+            self._counter += 1
+            seq = self._counter
+        sort_key = (task.priority, task.run_at.timestamp(), seq)
+        self.task_queue.put(_QueuedTask(sort_key, task))
+        self._log(f"Scheduled '{task.name}' (priority={task.priority}, run_at={task.run_at.strftime('%H:%M:%S')})")
+
+    def _worker_loop(self, worker_id):
+        while not self._stop_event.is_set():
+            try:
+                queued = self.task_queue.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            task = queued.task
+
+            wait = (task.run_at - datetime.now()).total_seconds()
+            if wait > 0:
+                time.sleep(min(wait, 0.5))
+                if (task.run_at - datetime.now()).total_seconds() > 0:
+                    self.task_queue.put(queued)  
+                    self.task_queue.task_done()
+                    continue
+
+            self._execute(task, worker_id)
+            self.task_queue.task_done()
+
+    def _execute(self, task: Task, worker_id):
+        task.attempts += 1
+        task.status = "RUNNING"
+        self._log(f"Worker-{worker_id} executing '{task.name}' (attempt {task.attempts})")
+        try:
+            task.action()
+            task.status = "SUCCESS"
+            self._log(f"Worker-{worker_id} '{task.name}' SUCCEEDED")
+        except Exception as e:
+            if task.attempts < task.max_retries:
+                backoff = 0.1 * (2 ** task.attempts)
+                task.status = "RETRYING"
+                self._log(f"Worker-{worker_id} '{task.name}' FAILED ({e}); "
+                          f"retrying in {backoff:.2f}s (attempt {task.attempts}/{task.max_retries})")
+                task.run_at = datetime.now() + timedelta(seconds=backoff)
+                with self._counter_lock:
+                    self._counter += 1
+                    seq = self._counter
+                self.task_queue.put(_QueuedTask((task.priority, task.run_at.timestamp(), seq), task))
+            else:
+                task.status = "FAILED"
+                self._log(f"Worker-{worker_id} '{task.name}' PERMANENTLY FAILED after "
+                          f"{task.attempts} attempts: {e}")
+
+    def start(self):
+        self.workers = [
+            threading.Thread(target=self._worker_loop, args=(i,), daemon=True)
+            for i in range(self.num_workers)
+        ]
+        for w in self.workers:
+            w.start()
+
+    def wait_until_idle(self, timeout=5):
+        self.task_queue.join()  
+        time.sleep(0.1)
+
+    def shutdown(self):
+        self._stop_event.set()
+        for w in self.workers:
+            w.join(timeout=1)
+
+
+def flaky_action(success_rate=0.5):
+    def action():
+        if random.random() > success_rate:
+            raise RuntimeError("simulated transient failure")
+    return action
+
+
+def demo():
+    scheduler = TaskScheduler(num_workers=3)
+    scheduler.start()
+
+    tasks = [
+        Task("send-welcome-email", flaky_action(0.7), priority=2),
+        Task("generate-report", flaky_action(0.3), priority=1, max_retries=4),
+        Task("cleanup-temp-files", lambda: None, priority=5),
+        Task("sync-inventory", flaky_action(0.4), priority=3),
+        Task("backup-database", lambda: None, priority=1,
+             run_at=datetime.now() + timedelta(seconds=0.3)),
+    ]
+
+    print("=== Scheduling tasks ===")
+    for t in tasks:
+        scheduler.schedule(t)
+
+    print("\n=== Executing (priority order + retries on failure) ===")
+    scheduler.wait_until_idle()
+    scheduler.shutdown()
+
+    print("\n=== Final task statuses ===")
+    for t in tasks:
+        print(f"  {t} (attempts={t.attempts})")
+
+
+if __name__ == "__main__":
+    demo()

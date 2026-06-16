@@ -1,0 +1,130 @@
+import random
+import threading
+import time
+from enum import Enum
+
+
+class SignalColor(Enum):
+    RED = "RED"
+    YELLOW = "YELLOW"
+    GREEN = "GREEN"
+
+
+class Lane:
+
+    MIN_GREEN = 0.3
+    MAX_GREEN = 1.2
+
+    def __init__(self, name, controller):
+        self.name = name
+        self.controller = controller
+        self.color = SignalColor.RED
+        self.vehicle_count = random.randint(0, 30)
+        self.emergency_vehicle_waiting = False
+        self.accident = False
+        self.lock = threading.Lock()
+
+    def density_level(self):
+        if self.vehicle_count > 20:
+            return "HIGH"
+        elif self.vehicle_count > 8:
+            return "MEDIUM"
+        return "LOW"
+
+    def dynamic_green_duration(self):
+        density = self.vehicle_count / 30.0
+        duration = self.MIN_GREEN + density * (self.MAX_GREEN - self.MIN_GREEN)
+        return round(duration, 2)
+
+    def maybe_trigger_accident(self):
+        if random.random() < 0.05:  
+            self.accident = True
+            self.controller.report_accident(self)
+
+    def run_cycle(self):
+        with self.lock:
+            if self.emergency_vehicle_waiting:
+                print(f"  [{self.name}] EMERGENCY VEHICLE PRIORITY -> forcing GREEN")
+                self.color = SignalColor.GREEN
+                time.sleep(self.MIN_GREEN)
+                self.emergency_vehicle_waiting = False
+                self.vehicle_count = max(0, self.vehicle_count - 5)
+                self.color = SignalColor.RED
+                return
+
+            self.controller.request_turn(self)
+            duration = self.dynamic_green_duration()
+            self.color = SignalColor.GREEN
+            print(f"  [{self.name}] GREEN for {duration}s (density={self.density_level()}, "
+                  f"{self.vehicle_count} vehicles waiting)")
+            time.sleep(duration)
+            cleared = min(self.vehicle_count, random.randint(3, 10))
+            self.vehicle_count -= cleared
+            self.maybe_trigger_accident()
+            self.color = SignalColor.YELLOW
+            time.sleep(0.1)
+            self.color = SignalColor.RED
+            self.controller.release_turn(self)
+            print(f"  [{self.name}] RED. Cleared {cleared} vehicles, {self.vehicle_count} remain.")
+
+
+class TrafficController:
+
+    def __init__(self):
+        self.intersection_lock = threading.Lock()
+        self.accidents = []
+        self.accidents_lock = threading.Lock()
+
+    def request_turn(self, lane):
+        self.intersection_lock.acquire()
+
+    def release_turn(self, lane):
+        self.intersection_lock.release()
+
+    def report_accident(self, lane):
+        with self.accidents_lock:
+            self.accidents.append(lane.name)
+        print(f"  [ALERT] Accident detected in {lane.name}! Dispatching response unit.")
+
+    def trigger_emergency(self, lane: Lane):
+        lane.emergency_vehicle_waiting = True
+        print(f"  [DISPATCH] Emergency vehicle approaching {lane.name} - requesting priority override")
+
+
+def lane_worker(lane: Lane, cycles: int):
+    for _ in range(cycles):
+        lane.run_cycle()
+        time.sleep(random.uniform(0.05, 0.15))
+
+
+def demo():
+    controller = TrafficController()
+    lanes = [Lane(f"Lane-{d}", controller) for d in ["North", "South", "East", "West"]]
+
+    print("=== Initial traffic density ===")
+    for lane in lanes:
+        print(f"  {lane.name}: {lane.vehicle_count} vehicles ({lane.density_level()})")
+
+
+    def emergency_trigger():
+        time.sleep(0.3)
+        controller.trigger_emergency(lanes[2])  
+        
+
+    threads = [threading.Thread(target=lane_worker, args=(lane, 3)) for lane in lanes]
+    threads.append(threading.Thread(target=emergency_trigger))
+
+    print("\n=== Running signal cycles concurrently across lanes ===")
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    print("\n=== Final report ===")
+    for lane in lanes:
+        print(f"  {lane.name}: {lane.vehicle_count} vehicles remaining, accident={lane.accident}")
+    print(f"  Total accidents detected: {len(controller.accidents)} -> {controller.accidents}")
+
+
+if __name__ == "__main__":
+    demo()

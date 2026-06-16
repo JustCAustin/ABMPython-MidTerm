@@ -1,0 +1,137 @@
+import os
+import random
+import threading
+import time
+from collections import defaultdict
+from datetime import datetime
+
+
+LEVELS = ["INFO", "WARNING", "ERROR", "CRITICAL"]
+LEVEL_WEIGHTS = [0.55, 0.2, 0.18, 0.07]
+
+
+class LogMonitor:
+
+    def __init__(self, filepath, name, report: "LogReport"):
+        self.filepath = filepath
+        self.name = name
+        self.report = report
+        self._stop_event = threading.Event()
+        self._position = 0
+
+    def stop(self):
+        self._stop_event.set()
+
+    def run(self):
+        open(self.filepath, "a").close()
+        while not self._stop_event.is_set():
+            with open(self.filepath, "r") as f:
+                f.seek(self._position)
+                new_lines = f.readlines()
+                self._position = f.tell()
+            for line in new_lines:
+                self._process_line(line.strip())
+            time.sleep(0.05)
+
+    def _process_line(self, line):
+        if not line:
+            return
+        level = self._classify(line)
+        self.report.record(self.name, level, line)
+        if level in ("ERROR", "CRITICAL", "WARNING"):
+            print(f"  [{self.name}] {level}: {line}")
+
+    @staticmethod
+    def _classify(line):
+        upper = line.upper()
+        if "CRITICAL" in upper:
+            return "CRITICAL"
+        if "ERROR" in upper:
+            return "ERROR"
+        if "WARN" in upper:
+            return "WARNING"
+        return "INFO"
+
+
+class LogReport:
+
+    def __init__(self):
+        self.counts = defaultdict(lambda: defaultdict(int))  
+        self.critical_events = []
+        self.lock = threading.Lock()
+
+    def record(self, source, level, line):
+        with self.lock:
+            self.counts[source][level] += 1
+            if level == "CRITICAL":
+                self.critical_events.append((source, line))
+
+    def summary(self):
+        lines = ["\n=== Log Monitoring Summary Report ==="]
+        grand_total = defaultdict(int)
+        with self.lock:
+            for source, level_counts in self.counts.items():
+                lines.append(f"  Source: {source}")
+                for level in LEVELS:
+                    c = level_counts.get(level, 0)
+                    grand_total[level] += c
+                    lines.append(f"    {level:9s}: {c}")
+            lines.append("  --- Totals across all files ---")
+            for level in LEVELS:
+                lines.append(f"    {level:9s}: {grand_total[level]}")
+            lines.append(f"  Critical failures detected: {len(self.critical_events)}")
+            for source, line in self.critical_events:
+                lines.append(f"    [{source}] {line}")
+        return "\n".join(lines)
+
+
+def log_writer(filepath, num_lines, delay_range=(0.01, 0.06)):
+    with open(filepath, "a") as f:
+        for i in range(num_lines):
+            level = random.choices(LEVELS, weights=LEVEL_WEIGHTS)[0]
+            timestamp = datetime.now().strftime("%H:%M:%S")
+            f.write(f"[{timestamp}] {level} - event #{i} occurred\n")
+            f.flush()
+            time.sleep(random.uniform(*delay_range))
+
+
+def demo():
+    work_dir = "/tmp/log_monitor_demo"
+    os.makedirs(work_dir, exist_ok=True)
+    files = {
+        "app-server": os.path.join(work_dir, "app_server.log"),
+        "db-service": os.path.join(work_dir, "db_service.log"),
+    }
+    for path in files.values():
+        open(path, "w").close()
+
+    report = LogReport()
+    monitors = {name: LogMonitor(path, name, report) for name, path in files.items()}
+
+    monitor_threads = [threading.Thread(target=m.run, daemon=True) for m in monitors.values()]
+    writer_threads = [
+        threading.Thread(target=log_writer, args=(path, 25)) for path in files.values()
+    ]
+
+    print("=== Monitoring multiple log files concurrently (real-time updates) ===")
+    for t in monitor_threads:
+        t.start()
+    for t in writer_threads:
+        t.start()
+    for t in writer_threads:
+        t.join()
+
+    time.sleep(0.3)  
+    for m in monitors.values():
+        m.stop()
+    for t in monitor_threads:
+        t.join(timeout=1)
+
+    print(report.summary())
+
+    for path in files.values():
+        os.remove(path)
+
+
+if __name__ == "__main__":
+    demo()

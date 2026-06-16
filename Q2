@@ -1,0 +1,261 @@
+import random
+import uuid
+from abc import ABC, abstractmethod
+from datetime import datetime
+from enum import Enum
+
+
+class FareStrategy(ABC):
+
+    @abstractmethod
+    def calculate_fare(self, distance_km: float, duration_min: float, surge_multiplier: float) -> float:
+        ...
+
+
+class StandardFareStrategy(FareStrategy):
+    BASE_FARE = 2.50
+    PER_KM = 1.20
+    PER_MIN = 0.20
+
+    def calculate_fare(self, distance_km, duration_min, surge_multiplier):
+        fare = self.BASE_FARE + (distance_km * self.PER_KM) + (duration_min * self.PER_MIN)
+        return round(fare * surge_multiplier, 2)
+
+
+class PremiumFareStrategy(FareStrategy):
+    BASE_FARE = 6.00
+    PER_KM = 2.10
+    PER_MIN = 0.35
+
+    def calculate_fare(self, distance_km, duration_min, surge_multiplier):
+        fare = self.BASE_FARE + (distance_km * self.PER_KM) + (duration_min * self.PER_MIN)
+        return round(fare * surge_multiplier, 2)
+
+
+class PoolFareStrategy(FareStrategy):
+    BASE_FARE = 1.50
+    PER_KM = 0.70
+    PER_MIN = 0.12
+
+    def calculate_fare(self, distance_km, duration_min, surge_multiplier):
+        fare = self.BASE_FARE + (distance_km * self.PER_KM) + (duration_min * self.PER_MIN)
+        return round(fare * surge_multiplier, 2)
+
+
+class TripStatus(Enum):
+    REQUESTED = "REQUESTED"
+    MATCHED = "MATCHED"
+    IN_PROGRESS = "IN_PROGRESS"
+    COMPLETED = "COMPLETED"
+    CANCELLED = "CANCELLED"
+
+
+class Vehicle:
+    def __init__(self, plate, make, model, vehicle_type="standard"):
+        self.plate = plate
+        self.make = make
+        self.model = model
+        self.vehicle_type = vehicle_type  
+
+    def __str__(self):
+        return f"{self.make} {self.model} ({self.plate}) [{self.vehicle_type}]"
+
+
+class Person(ABC):
+
+    def __init__(self, name, phone):
+        self.id = str(uuid.uuid4())[:8]
+        self.name = name
+        self.phone = phone
+
+    @abstractmethod
+    def role(self):
+        ...
+
+
+class Driver(Person):
+    def __init__(self, name, phone, vehicle: Vehicle):
+        super().__init__(name, phone)
+        self.vehicle = vehicle
+        self.is_available = True
+        self.ratings = []
+        self.location = (round(random.uniform(0, 10), 2), round(random.uniform(0, 10), 2))
+
+    def role(self):
+        return "Driver"
+
+    @property
+    def average_rating(self):
+        return round(sum(self.ratings) / len(self.ratings), 2) if self.ratings else 5.0
+
+    def receive_rating(self, score: int):
+        if 1 <= score <= 5:
+            self.ratings.append(score)
+
+    def __str__(self):
+        status = "available" if self.is_available else "busy"
+        return f"Driver {self.name} | {self.vehicle} | rating={self.average_rating} | {status}"
+
+
+class Rider(Person):
+    def __init__(self, name, phone):
+        super().__init__(name, phone)
+        self.trip_history = []
+
+    def role(self):
+        return "Rider"
+
+
+class Payment:
+    def __init__(self, amount, method="card"):
+        self.payment_id = str(uuid.uuid4())[:8]
+        self.amount = amount
+        self.method = method
+        self.timestamp = datetime.now()
+        self.status = "PENDING"
+
+    def process(self):
+        self.status = "PAID"
+        return True
+
+    def __str__(self):
+        return f"Payment[{self.payment_id}] ${self.amount:.2f} via {self.method} -> {self.status}"
+
+
+class Trip:
+    FARE_STRATEGIES = {
+        "standard": StandardFareStrategy(),
+        "premium": PremiumFareStrategy(),
+        "pool": PoolFareStrategy(),
+    }
+
+    def __init__(self, rider: Rider, ride_type="standard"):
+        self.trip_id = str(uuid.uuid4())[:8]
+        self.rider = rider
+        self.ride_type = ride_type
+        self.driver = None
+        self.distance_km = round(random.uniform(1, 25), 2)
+        self.duration_min = round(self.distance_km * random.uniform(2.0, 3.5), 1)
+        self.status = TripStatus.REQUESTED
+        self.fare = None
+        self.payment = None
+        self.surge_multiplier = 1.0
+
+    def assign_driver(self, driver: Driver, surge_multiplier=1.0):
+        self.driver = driver
+        self.surge_multiplier = surge_multiplier
+        driver.is_available = False
+        self.status = TripStatus.MATCHED
+
+    def start(self):
+        self.status = TripStatus.IN_PROGRESS
+
+    def complete(self):
+        strategy = self.FARE_STRATEGIES[self.ride_type]
+        self.fare = strategy.calculate_fare(self.distance_km, self.duration_min, self.surge_multiplier)
+        self.payment = Payment(self.fare)
+        self.payment.process()
+        self.status = TripStatus.COMPLETED
+        self.driver.is_available = True
+        self.rider.trip_history.append(self)
+
+    def __str__(self):
+        fare_str = f"${self.fare:.2f}" if self.fare is not None else "N/A"
+        return (f"Trip[{self.trip_id}] {self.rider.name} | {self.ride_type} | "
+                f"{self.distance_km}km/{self.duration_min}min | surge x{self.surge_multiplier} | "
+                f"fare={fare_str} | {self.status.value}")
+
+
+class RideSharingPlatform:
+    def __init__(self):
+        self.drivers = []
+        self.riders = []
+        self.trips = []
+
+    def register_driver(self, driver: Driver):
+        self.drivers.append(driver)
+
+    def register_rider(self, rider: Rider):
+        self.riders.append(rider)
+
+    def _current_surge(self):
+        available = sum(1 for d in self.drivers if d.is_available)
+        pending = sum(1 for t in self.trips if t.status == TripStatus.REQUESTED)
+        if available == 0:
+            return 2.5
+        ratio = pending / available if available else 0
+        if ratio > 1.5:
+            return 2.0
+        elif ratio > 0.75:
+            return 1.5
+        return 1.0
+
+    def match_driver(self, trip: Trip):
+        candidates = [
+            d for d in self.drivers
+            if d.is_available and d.vehicle.vehicle_type == trip.ride_type
+        ]
+        if not candidates:
+            return None
+        best = min(candidates, key=lambda d: d.average_rating * -1)  
+        surge = self._current_surge()
+        trip.assign_driver(best, surge)
+        return best
+
+    def request_ride(self, rider: Rider, ride_type="standard"):
+        trip = Trip(rider, ride_type)
+        self.trips.append(trip)
+        driver = self.match_driver(trip)
+        if driver is None:
+            print(f"  [!] No available {ride_type} driver for {rider.name}'s request right now.")
+            trip.status = TripStatus.CANCELLED
+            return trip
+        print(f"  Matched {rider.name} with {driver.name} (surge x{trip.surge_multiplier})")
+        trip.start()
+        trip.complete()
+        driver.receive_rating(random.randint(3, 5))
+        return trip
+
+
+def demo():
+    platform = RideSharingPlatform()
+
+    drivers = [
+        Driver("Sam", "555-0101", Vehicle("ABC-123", "Toyota", "Camry", "standard")),
+        Driver("Nina", "555-0102", Vehicle("XYZ-789", "Mercedes", "E-Class", "premium")),
+        Driver("Leo", "555-0103", Vehicle("POOL-01", "Honda", "Odyssey", "pool")),
+        Driver("Wes", "555-0104", Vehicle("DEF-456", "Toyota", "Corolla", "standard")),
+    ]
+    for d in drivers:
+        platform.register_driver(d)
+
+    riders = [Rider("Alice", "111-0001"), Rider("Bob", "111-0002"), Rider("Carla", "111-0003")]
+    for r in riders:
+        platform.register_rider(r)
+
+    print("=== Ride requests ===")
+    trips = [
+        platform.request_ride(riders[0], "standard"),
+        platform.request_ride(riders[1], "premium"),
+        platform.request_ride(riders[2], "pool"),
+        platform.request_ride(riders[0], "standard"),  
+        platform.request_ride(riders[1], "premium"),   
+    ]
+
+    print("\n=== Trip summaries ===")
+    for t in trips:
+        print(t)
+        if t.payment:
+            print(f"  {t.payment}")
+
+    print("\n=== Driver stats ===")
+    for d in drivers:
+        print(d)
+
+    print(f"\n=== {riders[0].name}'s trip history ===")
+    for t in riders[0].trip_history:
+        print(" ", t)
+
+
+if __name__ == "__main__":
+    demo()
